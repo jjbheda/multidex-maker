@@ -29,7 +29,7 @@ DEX_JAR = dx.jar
 BAK_DEX_JAR = bak.dx.jar
 
 
-all: clean install
+all:  install
 
 
 build: createSourceFile
@@ -50,14 +50,14 @@ jar: build
 install: jar
 	$(info install)
 	@cp $(DEX_LIB_PATH)/$(DEX_JAR) $(DEX_LIB_PATH)/$(BAK_DEX_JAR) && \
-	mv $(LOCAL_PATH)/$(DEX_JAR) $(DEX_LIB_PATH)/$(DEX_JAR)
+	cp $(LOCAL_PATH)/$(DEX_JAR) $(DEX_LIB_PATH)/$(DEX_JAR)
 	$(info install done.)
 
 
-clean:
-	$(info clean)
-	@rm $(DEX_JAR) -rvf \
-	rm $(SOURCE_FILE) -rvf \
+# clean:
+# 	$(info clean)
+# 	@rm $(DEX_JAR) -rvf \
+# 	rm $(SOURCE_FILE) -rvf \
 	$(shell find . -name "*.class" | while read x; do rm $$x; done)
 
 
