@@ -1,5 +1,3 @@
-
-
 SOURCE_DIR = src
 
 MANIFEST_FILE = etc/manifest.txt
