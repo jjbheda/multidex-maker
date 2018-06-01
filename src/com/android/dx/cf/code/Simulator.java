@@ -16,6 +16,8 @@
 
 package com.android.dx.cf.code;
 
+import com.android.dex.DexFormat;
+import com.android.dx.dex.DexOptions;
 import com.android.dx.rop.code.LocalItem;
 import com.android.dx.rop.cst.Constant;
 import com.android.dx.rop.cst.CstFieldRef;
@@ -56,13 +58,17 @@ public class Simulator {
     /** {@code non-null;} visitor instance to use */
     private final SimVisitor visitor;
 
+    /** {@code non-null;} options for dex output */
+    private final DexOptions dexOptions;
+
     /**
      * Constructs an instance.
      *
      * @param machine {@code non-null;} machine to use when simulating
      * @param method {@code non-null;} method data to use
+     * @param dexOptions {@code non-null;} options for dex output
      */
-    public Simulator(Machine machine, ConcreteMethod method) {
+    public Simulator(Machine machine, ConcreteMethod method, DexOptions dexOptions) {
         if (machine == null) {
             throw new NullPointerException("machine == null");
         }
@@ -75,6 +81,7 @@ public class Simulator {
         this.code = method.getCode();
         this.localVariables = method.getLocalVariables();
         this.visitor = new SimVisitor();
+        this.dexOptions = dexOptions;
     }
 
     /**
@@ -105,7 +112,7 @@ public class Simulator {
      * Simulates the effect of the instruction at the given offset, by
      * making appropriate calls on the given frame.
      *
-     * @param offset {@code >= 0;} offset of the instruction to simulate
+     * @param offset {@code offset >= 0;} offset of the instruction to simulate
      * @param frame {@code non-null;} frame to operate on
      * @return the length of the instruction, in bytes
      */
@@ -141,14 +148,19 @@ public class Simulator {
      * actually present on the stack.</p>
      *
      * <p>In the case where there is a known-null on the stack where
-     * an array is expected, we just fall back to the implied type of
-     * the instruction. Due to the quirk described above, this means
-     * that source code that uses <code>boolean[]</code> might get
-     * translated surprisingly -- but correctly -- into an instruction
-     * that specifies a <code>byte[]</code>. It will be correct,
-     * because should the code actually execute, it will necessarily
-     * throw a <code>NullPointerException</code>, and it won't matter
-     * what opcode variant is used to achieve that result.</p>
+     * an array is expected, our behavior depends on the implied type
+     * of the instruction. When the implied type is a reference, we
+     * don't attempt to infer anything, as we don't know the dimension
+     * of the null constant and thus any explicit inferred type could
+     * be wrong. When the implied type is a primitive, we fall back to
+     * the implied type of the instruction. Due to the quirk described
+     * above, this means that source code that uses
+     * <code>boolean[]</code> might get translated surprisingly -- but
+     * correctly -- into an instruction that specifies a
+     * <code>byte[]</code>. It will be correct, because should the
+     * code actually execute, it will necessarily throw a
+     * <code>NullPointerException</code>, and it won't matter what
+     * opcode variant is used to achieve that result.</p>
      *
      * @param impliedType {@code non-null;} type implied by the
      * instruction; is <i>not</i> an array type
@@ -160,7 +172,9 @@ public class Simulator {
     private static Type requiredArrayTypeFor(Type impliedType,
             Type foundArrayType) {
         if (foundArrayType == Type.KNOWN_NULL) {
-            return impliedType.getArrayType();
+            return impliedType.isReference()
+                ? Type.KNOWN_NULL
+                : impliedType.getArrayType();
         }
 
         if ((impliedType == Type.OBJECT)
@@ -317,7 +331,9 @@ public class Simulator {
                         requiredArrayTypeFor(type, foundArrayType);
 
                     // Make type agree with the discovered requiredArrayType.
-                    type = requiredArrayType.getComponentType();
+                    type = (requiredArrayType == Type.KNOWN_NULL)
+                        ? Type.KNOWN_NULL
+                        : requiredArrayType.getComponentType();
 
                     machine.popArgs(frame, requiredArrayType, Type.INT);
                     break;
@@ -375,7 +391,9 @@ public class Simulator {
                      * if it has local info.
                      */
                     if (foundArrayLocal) {
-                        type = requiredArrayType.getComponentType();
+                        type = (requiredArrayType == Type.KNOWN_NULL)
+                            ? Type.KNOWN_NULL
+                            : requiredArrayType.getComponentType();
                     }
 
                     machine.popArgs(frame, requiredArrayType, Type.INT, type);
@@ -570,8 +588,9 @@ public class Simulator {
                 localType = local.getType();
                 if (localType.getBasicFrameType() !=
                         type.getBasicFrameType()) {
-                    BaseMachine.throwLocalMismatch(type, localType);
-                    return;
+                    // wrong type, ignore local variable info
+                    local = null;
+                    localType = type;
                 }
             } else {
                 localType = type;
@@ -636,32 +655,51 @@ public class Simulator {
                     machine.popArgs(frame, Type.OBJECT, fieldType);
                     break;
                 }
-                case ByteOps.INVOKEINTERFACE: {
-                    /*
-                     * Convert the interface method ref into a normal
-                     * method ref.
-                     */
-                    cst = ((CstInterfaceMethodRef) cst).toMethodRef();
-                    // and fall through...
-                }
+                case ByteOps.INVOKEINTERFACE:
                 case ByteOps.INVOKEVIRTUAL:
-                case ByteOps.INVOKESPECIAL: {
-                    /*
-                     * Get the instance prototype, and use it to direct
-                     * the machine.
-                     */
-                    Prototype prototype =
-                        ((CstMethodRef) cst).getPrototype(false);
-                    machine.popArgs(frame, prototype);
-                    break;
-                }
+                case ByteOps.INVOKESPECIAL:
                 case ByteOps.INVOKESTATIC: {
                     /*
-                     * Get the static prototype, and use it to direct
-                     * the machine.
+                     * Convert the interface method ref into a normal
+                     * method ref if necessary.
                      */
+                    if (cst instanceof CstInterfaceMethodRef) {
+                        if (opcode != ByteOps.INVOKEINTERFACE) {
+                            if (!dexOptions.canUseDefaultInterfaceMethods()) {
+                                throw new SimException(
+                                    "default or static interface method used without " +
+                                    "--min-sdk-version >= " + DexFormat.API_DEFAULT_INTERFACE_METHODS);
+                            }
+                        }
+                        cst = ((CstInterfaceMethodRef) cst).toMethodRef();
+                    }
+
+                    /*
+                     * Check whether invoke-polymorphic is required and supported.
+                    */
+                    if (cst instanceof CstMethodRef) {
+                        CstMethodRef methodRef = (CstMethodRef) cst;
+                        if (methodRef.isSignaturePolymorphic()) {
+                            if (!dexOptions.canUseInvokePolymorphic()) {
+                                throw new SimException(
+                                    "signature-polymorphic method called without " +
+                                    "--min-sdk-version >= " + DexFormat.API_INVOKE_POLYMORPHIC);
+                            }
+                            if (opcode != ByteOps.INVOKEVIRTUAL) {
+                                throw new SimException(
+                                    "Unsupported signature polymorphic invocation (" +
+                                    ByteOps.opName(opcode) + ")");
+                            }
+                        }
+                    }
+
+                    /*
+                     * Get the instance or static prototype, and use it to
+                     * direct the machine.
+                     */
+                    boolean staticMethod = (opcode == ByteOps.INVOKESTATIC);
                     Prototype prototype =
-                        ((CstMethodRef) cst).getPrototype(true);
+                        ((CstMethodRef) cst).getPrototype(staticMethod);
                     machine.popArgs(frame, prototype);
                     break;
                 }

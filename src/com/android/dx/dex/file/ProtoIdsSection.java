@@ -17,6 +17,7 @@
 package com.android.dx.dex.file;
 
 import com.android.dx.rop.cst.Constant;
+import com.android.dx.rop.cst.CstProtoRef;
 import com.android.dx.rop.type.Prototype;
 import com.android.dx.util.AnnotatedOutput;
 import com.android.dx.util.Hex;
@@ -53,7 +54,22 @@ public final class ProtoIdsSection extends UniformItemSection {
     /** {@inheritDoc} */
     @Override
     public IndexedItem get(Constant cst) {
-        throw new UnsupportedOperationException("unsupported");
+        if (cst == null) {
+            throw new NullPointerException("cst == null");
+        }
+
+        if (!(cst instanceof CstProtoRef)) {
+            throw new IllegalArgumentException("cst not instance of CstProtoRef");
+        }
+
+        throwIfNotPrepared();
+        CstProtoRef protoRef = (CstProtoRef) cst;
+        IndexedItem result = protoIds.get(protoRef.getPrototype());
+        if (result == null) {
+            throw new IllegalArgumentException("not found");
+        }
+
+        return result;
     }
 
     /**
@@ -86,7 +102,7 @@ public final class ProtoIdsSection extends UniformItemSection {
      * @param prototype {@code non-null;} the prototype to intern
      * @return {@code non-null;} the interned reference
      */
-    public ProtoIdItem intern(Prototype prototype) {
+    public synchronized ProtoIdItem intern(Prototype prototype) {
         if (prototype == null) {
             throw new NullPointerException("prototype == null");
         }
